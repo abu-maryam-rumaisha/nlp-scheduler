@@ -3,8 +3,10 @@ package api
 import (
 	"errors"
 	"log/slog"
+	"net/mail"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gofiber/fiber/v3"
 
@@ -178,6 +180,9 @@ func (s *Server) login(c fiber.Ctx) error {
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
+		// Code is the authenticator app code, needed when the user has
+		// two-factor authentication on.
+		Code string `json:"code"`
 	}
 	if err := decode(c, &req); err != nil {
 		return err
@@ -193,7 +198,128 @@ func (s *Server) login(c fiber.Ctx) error {
 	if !auth.CheckPassword(hash, req.Password) {
 		return httpErr(fiber.StatusUnauthorized, "invalid username or password")
 	}
+	if u.TOTPEnabled {
+		// The client recognises field "code" as "ask for the code and retry".
+		if req.Code == "" {
+			return &httpError{Status: fiber.StatusUnauthorized, Msg: "enter the code from your authenticator app", Field: "code"}
+		}
+		if err := s.checkTOTP(c, u.ID, u.TOTPSecret, req.Code, fiber.StatusUnauthorized); err != nil {
+			return err
+		}
+	}
 	return s.startSession(c, u)
+}
+
+// checkTOTP verifies an authenticator code and marks it used. A wrong or
+// reused code fails with the given status and field "code".
+func (s *Server) checkTOTP(c fiber.Ctx, userID int64, secret, code string, status int) error {
+	invalid := &httpError{Status: status, Msg: "invalid or already used authenticator code", Field: "code"}
+	step, ok := auth.CheckTOTP(secret, code, time.Now())
+	if !ok {
+		return invalid
+	}
+	fresh, err := s.store.UseTOTPStep(c.Context(), userID, step)
+	if err != nil {
+		return err
+	}
+	if !fresh {
+		return invalid
+	}
+	return nil
+}
+
+// setupTOTP starts enrolling an authenticator app: it creates a secret and
+// returns it with a QR code to scan. Nothing changes until enableTOTP
+// confirms a code.
+func (s *Server) setupTOTP(c fiber.Ctx) error {
+	u := currentUser(c)
+	if u.TOTPEnabled {
+		return httpErr(fiber.StatusConflict, "two-factor authentication is already on")
+	}
+	secret, err := auth.NewTOTPSecret()
+	if err != nil {
+		return err
+	}
+	if err := s.sessions.SetPendingTOTP(c.Context(), u.ID, secret); err != nil {
+		return err
+	}
+	otpURL := auth.TOTPURL(secret, u.Username)
+	qrCode, err := auth.TOTPQRCode(otpURL)
+	if err != nil {
+		return err
+	}
+	return c.JSON(fiber.Map{
+		"secret":      secret,
+		"otpauth_url": otpURL,
+		"qr_code":     qrCode,
+		"expires_at":  time.Now().Add(auth.TOTPSetupTTL).UTC(),
+	})
+}
+
+// enableTOTP turns two-factor authentication on once the user proves their
+// app works. Other sessions are ended and this client gets a fresh one.
+func (s *Server) enableTOTP(c fiber.Ctx) error {
+	var req struct {
+		Code string `json:"code"`
+	}
+	if err := decode(c, &req); err != nil {
+		return err
+	}
+	u := currentUser(c)
+	if u.TOTPEnabled {
+		return httpErr(fiber.StatusConflict, "two-factor authentication is already on")
+	}
+	secret, err := s.sessions.PendingTOTP(c.Context(), u.ID)
+	if err != nil {
+		return err
+	}
+	if secret == "" {
+		return httpErr(fiber.StatusBadRequest, "setup expired, start again")
+	}
+	step, ok := auth.CheckTOTP(secret, req.Code, time.Now())
+	if !ok {
+		return &httpError{Status: fiber.StatusBadRequest, Msg: "invalid authenticator code", Field: "code"}
+	}
+	if u, err = s.store.SetTOTPSecret(c.Context(), u.ID, secret); err != nil {
+		return err
+	}
+	if _, err := s.store.UseTOTPStep(c.Context(), u.ID, step); err != nil {
+		return err
+	}
+	if err := s.sessions.ClearPendingTOTP(c.Context(), u.ID); err != nil {
+		return err
+	}
+	if err := s.sessions.DeleteAll(c.Context(), u.ID); err != nil {
+		return err
+	}
+	return s.startSession(c, u)
+}
+
+// disableTOTP turns the user's own two-factor authentication off. It needs
+// both the password and a current code.
+func (s *Server) disableTOTP(c fiber.Ctx) error {
+	var req struct {
+		Password string `json:"password"`
+		Code     string `json:"code"`
+	}
+	if err := decode(c, &req); err != nil {
+		return err
+	}
+	u := currentUser(c)
+	if !u.TOTPEnabled {
+		return httpErr(fiber.StatusConflict, "two-factor authentication is not on")
+	}
+	if !auth.CheckPassword(u.PasswordHash, req.Password) {
+		return &httpError{Status: fiber.StatusBadRequest, Msg: "password is incorrect", Field: "password"}
+	}
+	if err := s.checkTOTP(c, u.ID, u.TOTPSecret, req.Code, fiber.StatusBadRequest); err != nil {
+		return err
+	}
+	u, err := s.store.SetTOTPSecret(c.Context(), u.ID, "")
+	if err != nil {
+		return err
+	}
+	return c.JSON(u)
 }
 
 // logout ends the current session in Redis and clears the cookie.
@@ -207,6 +333,34 @@ func (s *Server) logout(c fiber.Ctx) error {
 
 func (s *Server) me(c fiber.Ctx) error {
 	return c.JSON(currentUser(c))
+}
+
+// updateProfile lets any user set their own display name and email. Empty
+// values clear them.
+func (s *Server) updateProfile(c fiber.Ctx) error {
+	var req struct {
+		DisplayName string `json:"display_name"`
+		Email       string `json:"email"`
+	}
+	if err := decode(c, &req); err != nil {
+		return err
+	}
+	name := strings.TrimSpace(req.DisplayName)
+	if utf8.RuneCountInString(name) > 100 {
+		return &httpError{Status: fiber.StatusBadRequest, Msg: "must be at most 100 characters", Field: "display_name"}
+	}
+	email := strings.TrimSpace(req.Email)
+	if email != "" {
+		// Only a bare address, not "Name <addr>".
+		if a, err := mail.ParseAddress(email); err != nil || a.Address != email || len(email) > 254 {
+			return &httpError{Status: fiber.StatusBadRequest, Msg: "not a valid email address", Field: "email"}
+		}
+	}
+	u, err := s.store.UpdateProfile(c.Context(), currentUser(c).ID, name, email)
+	if err != nil {
+		return err
+	}
+	return c.JSON(u)
 }
 
 // changePassword lets any user change their own password. All of the user's

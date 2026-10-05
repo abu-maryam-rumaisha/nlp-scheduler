@@ -43,6 +43,12 @@ paths:
               properties:
                 username: { type: string }
                 password: { type: string, format: password }
+                code:
+                  type: string
+                  description: >-
+                    6-digit authenticator app code. Required when the user has two-factor
+                    authentication on; without it a correct password gets a 401 with
+                    `field: code`, meaning "ask for the code and retry".
       responses:
         "200": { $ref: "#/components/responses/Session" }
         "401": { $ref: "#/components/responses/Error" }
@@ -66,6 +72,27 @@ paths:
               schema: { $ref: "#/components/schemas/User" }
         "401": { $ref: "#/components/responses/Error" }
 
+  /api/v1/auth/profile:
+    put:
+      summary: Update your own display name and email (session only)
+      description: Empty values clear a field.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                display_name: { type: string, maxLength: 100 }
+                email: { type: string, format: email, maxLength: 254 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/Error" }
+
   /api/v1/auth/password:
     put:
       summary: Change your own password
@@ -83,6 +110,66 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Session" }
         "400": { $ref: "#/components/responses/Error" }
+
+  /api/v1/auth/totp/setup:
+    post:
+      summary: Start setting up an authenticator app (session only)
+      description: >-
+        Creates a TOTP secret (SHA-1, 6 digits, 30 s, as used by Google Authenticator)
+        and holds it for 10 minutes. Nothing changes until /auth/totp/enable confirms a code.
+      responses:
+        "200":
+          description: Secret to scan or type into the app
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  secret: { type: string, description: Base32 key for manual entry }
+                  otpauth_url: { type: string }
+                  qr_code: { type: string, description: PNG data URI of the otpauth URL }
+                  expires_at: { type: string, format: date-time }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/auth/totp/enable:
+    post:
+      summary: Turn on two-factor authentication (session only)
+      description: Confirms the pending secret with a code from the app. Signs out the user's other sessions and returns a fresh token.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/Session" }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/auth/totp/disable:
+    post:
+      summary: Turn off your own two-factor authentication (session only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password, code]
+              properties:
+                password: { type: string, format: password }
+                code: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
 
   /api/v1/roles:
     get:
@@ -204,7 +291,7 @@ paths:
               schema: { $ref: "#/components/schemas/User" }
         "404": { $ref: "#/components/responses/Error" }
     patch:
-      summary: Change a user's role or reset their password (prosecutor)
+      summary: Change a user's role, reset their password or turn off their 2FA (prosecutor)
       description: A password reset signs the user out everywhere. You cannot remove your own prosecutor role.
       requestBody:
         required: true
@@ -215,6 +302,7 @@ paths:
               properties:
                 role: { $ref: "#/components/schemas/Role" }
                 password: { type: string, format: password, minLength: 8, maxLength: 72 }
+                reset_totp: { type: boolean, description: Turn off the user's two-factor authentication, e.g. after a lost phone }
       responses:
         "200":
           description: OK
@@ -607,7 +695,10 @@ components:
       properties:
         id: { type: integer }
         username: { type: string }
+        display_name: { type: string }
+        email: { type: string }
         role: { $ref: "#/components/schemas/Role" }
+        totp_enabled: { type: boolean, description: Two-factor authentication is on }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
 

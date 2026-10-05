@@ -1,6 +1,7 @@
 import { html, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { api, type Role, type User } from '../api';
+import { userAvatar } from '../components/avatar';
 import { confirmAction } from '../components/confirm';
 import { clampPage, pageOf, pagedTable, type PageState } from '../components/pager';
 import { LightElement, errorMessage, notify, session, timeAgo, valueOf } from '../core';
@@ -64,6 +65,24 @@ export class UsersPage extends LightElement {
       this.formError = errorMessage(err);
     } finally {
       this.saving = false;
+    }
+  }
+
+  private async confirmResetTOTP(u: User) {
+    const ok = await confirmAction({
+      title: 'Turn off two-factor authentication',
+      body: html`Turn off two-factor authentication for <strong>${u.username}</strong>? Use this if they lost their
+        authenticator; they can set it up again after signing in.`,
+      confirmLabel: 'Turn off',
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await api.updateUser(u.id, { reset_totp: true });
+      notify(`Two-factor authentication turned off for ${u.username}`, 'success');
+      await this.load();
+    } catch (e) {
+      notify(errorMessage(e), 'danger');
     }
   }
 
@@ -137,8 +156,9 @@ export class UsersPage extends LightElement {
               <table class="data-table">
                 <thead>
                   <tr>
-                    <th>Username</th>
+                    <th>User</th>
                     <th>Role</th>
+                    <th>2FA</th>
                     <th>Created</th>
                     <th></th>
                   </tr>
@@ -147,9 +167,17 @@ export class UsersPage extends LightElement {
                   ${pageOf(this.users, clampPage(this.paging, this.users.length)).map(
                     (u) => html`
                       <tr>
-                        <td class="font-medium">
-                          ${u.username}
-                          ${u.id === me.id ? html`<wa-badge variant="neutral" appearance="outlined" class="ml-2">you</wa-badge>` : nothing}
+                        <td>
+                          <div class="flex items-center gap-3">
+                            ${userAvatar(u, '2rem')}
+                            <div class="min-w-0">
+                              <div class="font-medium">
+                                ${u.display_name || u.username}
+                                ${u.id === me.id ? html`<wa-badge variant="neutral" appearance="outlined" class="ml-2">you</wa-badge>` : nothing}
+                              </div>
+                              ${u.display_name ? html`<div class="text-xs text-(--wa-color-text-quiet)">@${u.username}</div>` : nothing}
+                            </div>
+                          </div>
                         </td>
                         <td>
                           <wa-select
@@ -161,6 +189,11 @@ export class UsersPage extends LightElement {
                           >
                             ${this.roles.map((r) => html`<wa-option value=${r.name}>${r.name}</wa-option>`)}
                           </wa-select>
+                        </td>
+                        <td>
+                          ${u.totp_enabled
+                            ? html`<wa-badge variant="success" appearance="outlined">on</wa-badge>`
+                            : html`<span class="text-(--wa-color-text-quiet)">off</span>`}
                         </td>
                         <td class="text-(--wa-color-text-quiet)">${timeAgo(u.created_at)}</td>
                         <td class="text-right whitespace-nowrap">
@@ -175,6 +208,16 @@ export class UsersPage extends LightElement {
                           >
                             <wa-icon name="key" label="Reset password"></wa-icon>
                           </wa-button>
+                          ${u.totp_enabled
+                            ? html`<wa-button
+                                size="s"
+                                appearance="plain"
+                                title="Turn off two-factor authentication"
+                                @click=${() => this.confirmResetTOTP(u)}
+                              >
+                                <wa-icon name="shield" label="Turn off two-factor authentication"></wa-icon>
+                              </wa-button>`
+                            : nothing}
                           <wa-button
                             size="s"
                             appearance="plain"

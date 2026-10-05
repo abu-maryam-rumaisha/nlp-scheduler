@@ -32,7 +32,7 @@ export const session = new Session();
 
 // --- router ----------------------------------------------------------------
 
-export const ROUTES = ['/instances', '/deployments', '/templates', '/users'] as const;
+export const ROUTES = ['/instances', '/deployments', '/templates', '/users', '/settings'] as const;
 
 class Router extends EventTarget {
   get path() {

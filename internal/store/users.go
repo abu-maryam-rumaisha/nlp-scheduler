@@ -22,19 +22,24 @@ type Role struct {
 type User struct {
 	ID           int64     `json:"id"`
 	Username     string    `json:"username"`
+	DisplayName  string    `json:"display_name"`
+	Email        string    `json:"email"`
 	Role         string    `json:"role"`
 	PasswordHash string    `json:"-"`
+	TOTPSecret   string    `json:"-"`
+	TOTPEnabled  bool      `json:"totp_enabled"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 const userSelect = `
-	SELECT u.id, u.username, r.name, u.password_hash, u.created_at, u.updated_at
+	SELECT u.id, u.username, u.display_name, u.email, r.name, u.password_hash, COALESCE(u.totp_secret, ''), u.created_at, u.updated_at
 	FROM users u JOIN roles r ON r.id = u.role_id`
 
 func scanUser(r pgx.Row) (User, error) {
 	var u User
-	err := r.Scan(&u.ID, &u.Username, &u.Role, &u.PasswordHash, &u.CreatedAt, &u.UpdatedAt)
+	err := r.Scan(&u.ID, &u.Username, &u.DisplayName, &u.Email, &u.Role, &u.PasswordHash, &u.TOTPSecret, &u.CreatedAt, &u.UpdatedAt)
+	u.TOTPEnabled = u.TOTPSecret != ""
 	return u, err
 }
 
@@ -139,6 +144,47 @@ func (s *Store) UpdateUser(ctx context.Context, id int64, role, passwordHash *st
 		return nil, err
 	}
 	return &u, nil
+}
+
+// UpdateProfile sets the user's display name and email.
+func (s *Store) UpdateProfile(ctx context.Context, id int64, displayName, email string) (*User, error) {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE users SET display_name = $2, email = $3, updated_at = now() WHERE id = $1`,
+		id, displayName, email)
+	if err != nil {
+		return nil, err
+	}
+	if tag.RowsAffected() == 0 {
+		return nil, ErrNotFound
+	}
+	return s.GetUser(ctx, id)
+}
+
+// SetTOTPSecret turns two-factor authentication on with secret, or off when
+// secret is empty.
+func (s *Store) SetTOTPSecret(ctx context.Context, id int64, secret string) (*User, error) {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE users SET totp_secret = NULLIF($2, ''), totp_last_step = 0, updated_at = now()
+		WHERE id = $1`, id, secret)
+	if err != nil {
+		return nil, err
+	}
+	if tag.RowsAffected() == 0 {
+		return nil, ErrNotFound
+	}
+	return s.GetUser(ctx, id)
+}
+
+// UseTOTPStep records that a code for the given time step was accepted. It
+// returns false if a code for that step or a later one was already used, so
+// each code works only once.
+func (s *Store) UseTOTPStep(ctx context.Context, id, step int64) (bool, error) {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE users SET totp_last_step = $2 WHERE id = $1 AND totp_last_step < $2`, id, step)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 func (s *Store) DeleteUser(ctx context.Context, id int64) error {

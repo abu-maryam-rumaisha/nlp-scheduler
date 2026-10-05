@@ -11,9 +11,23 @@ export interface Role {
 export interface User {
   id: number;
   username: string;
+  /** Optional; shown instead of the username when set. */
+  display_name: string;
+  email: string;
   role: string;
+  /** Two-factor authentication with an authenticator app is on. */
+  totp_enabled: boolean;
   created_at: string;
   updated_at: string;
+}
+
+export interface TOTPSetup {
+  /** Base32 secret, for typing into the app when the QR code cannot be scanned. */
+  secret: string;
+  otpauth_url: string;
+  /** PNG data: URI of the QR code. */
+  qr_code: string;
+  expires_at: string;
 }
 
 export interface APIKey {
@@ -140,17 +154,26 @@ const qs = (params: Record<string, string | number | undefined>) => {
 };
 
 export const api = {
-  login: (username: string, password: string) =>
-    request<{ user: User }>('POST', '/auth/login', { username, password }),
+  /**
+   * Signs in. When the user has 2FA on and no code is given, fails with an
+   * ApiError whose field is `code`; ask for it and call again.
+   */
+  login: (username: string, password: string, code?: string) =>
+    request<{ user: User }>('POST', '/auth/login', { username, password, ...(code ? { code } : {}) }),
   logout: () => request<void>('POST', '/auth/logout'),
   me: () => request<User>('GET', '/auth/me'),
+  updateProfile: (p: { display_name: string; email: string }) => request<User>('PUT', '/auth/profile', p),
   changePassword: (current_password: string, new_password: string) =>
     request<{ user: User }>('PUT', '/auth/password', { current_password, new_password }),
+  setupTOTP: () => request<TOTPSetup>('POST', '/auth/totp/setup'),
+  /** Turns 2FA on; other sessions are signed out. */
+  enableTOTP: (code: string) => request<{ user: User }>('POST', '/auth/totp/enable', { code }),
+  disableTOTP: (password: string, code: string) => request<User>('POST', '/auth/totp/disable', { password, code }),
 
   listRoles: () => request<{ roles: Role[] }>('GET', '/roles').then((r) => r.roles),
   listUsers: () => request<{ users: User[] }>('GET', '/users').then((r) => r.users),
   createUser: (u: { username: string; password: string; role: string }) => request<User>('POST', '/users', u),
-  updateUser: (id: number, patch: { role?: string; password?: string }) => request<User>('PATCH', `/users/${id}`, patch),
+  updateUser: (id: number, patch: { role?: string; password?: string; reset_totp?: boolean }) => request<User>('PATCH', `/users/${id}`, patch),
   deleteUser: (id: number) => request<void>('DELETE', `/users/${id}`),
 
   listAPIKeys: (all = false) =>

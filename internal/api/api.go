@@ -73,7 +73,11 @@ func (s *Server) App(ui fs.FS) *fiber.App {
 	session := s.requireSession
 
 	v1.Get("/auth/me", s.me)
+	v1.Put("/auth/profile", session, s.updateProfile)
 	v1.Put("/auth/password", session, s.changePassword)
+	v1.Post("/auth/totp/setup", session, s.setupTOTP)
+	v1.Post("/auth/totp/enable", session, s.enableTOTP)
+	v1.Post("/auth/totp/disable", session, s.disableTOTP)
 
 	v1.Get("/roles", s.listRoles)
 

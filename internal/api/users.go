@@ -59,15 +59,17 @@ func (s *Server) createUser(c fiber.Ctx) error {
 	return c.Status(fiber.StatusCreated).JSON(u)
 }
 
-// updateUser changes a user's role and/or resets their password.
+// updateUser changes a user's role, resets their password and/or turns off
+// their two-factor authentication (e.g. after they lost their phone).
 func (s *Server) updateUser(c fiber.Ctx) error {
 	id, err := pathID(c, "id")
 	if err != nil {
 		return err
 	}
 	var req struct {
-		Role     *string `json:"role"`
-		Password *string `json:"password"`
+		Role      *string `json:"role"`
+		Password  *string `json:"password"`
+		ResetTOTP bool    `json:"reset_totp"`
 	}
 	if err := decode(c, &req); err != nil {
 		return err
@@ -89,6 +91,11 @@ func (s *Server) updateUser(c fiber.Ctx) error {
 	u, err := s.store.UpdateUser(c.Context(), id, req.Role, hash)
 	if err != nil {
 		return err
+	}
+	if req.ResetTOTP {
+		if u, err = s.store.SetTOTPSecret(c.Context(), id, ""); err != nil {
+			return err
+		}
 	}
 	// A password reset signs the user out everywhere.
 	if hash != nil {

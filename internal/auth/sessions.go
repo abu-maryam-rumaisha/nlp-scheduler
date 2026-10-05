@@ -130,3 +130,27 @@ func (s *Sessions) DeleteAll(ctx context.Context, userID int64) error {
 	keys = append(keys, userSetKey(userID))
 	return s.rdb.Del(ctx, keys...).Err()
 }
+
+func totpSetupKey(userID int64) string { return "totp_setup:" + strconv.FormatInt(userID, 10) }
+
+// TOTPSetupTTL is how long a user has to confirm a new authenticator.
+const TOTPSetupTTL = 10 * time.Minute
+
+// SetPendingTOTP holds a secret the user is enrolling until they confirm it
+// with a code from their app.
+func (s *Sessions) SetPendingTOTP(ctx context.Context, userID int64, secret string) error {
+	return s.rdb.Set(ctx, totpSetupKey(userID), secret, TOTPSetupTTL).Err()
+}
+
+// PendingTOTP returns the secret being enrolled, or "" if there is none.
+func (s *Sessions) PendingTOTP(ctx context.Context, userID int64) (string, error) {
+	v, err := s.rdb.Get(ctx, totpSetupKey(userID)).Result()
+	if errors.Is(err, redis.Nil) {
+		return "", nil
+	}
+	return v, err
+}
+
+func (s *Sessions) ClearPendingTOTP(ctx context.Context, userID int64) error {
+	return s.rdb.Del(ctx, totpSetupKey(userID)).Err()
+}

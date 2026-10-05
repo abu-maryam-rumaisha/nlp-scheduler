@@ -2,14 +2,15 @@ import { html } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { api, SESSION_EXPIRED } from '../api';
 import { LightElement, errorMessage, notify, router, session } from '../core';
+import { displayName, userAvatar } from './avatar';
 
 import '../pages/api-keys-page';
 import '../pages/deployments-page';
 import '../pages/instances-page';
 import '../pages/login-page';
+import '../pages/settings-page';
 import '../pages/templates-page';
 import '../pages/users-page';
-import './password-dialog';
 
 const NAV = [
   { path: '/instances', label: 'Instances', icon: 'server' },
@@ -17,12 +18,12 @@ const NAV = [
   { path: '/templates', label: 'Templates', icon: 'file' },
   { path: '/api-keys', label: 'API keys', icon: 'key' },
   { path: '/users', label: 'Users', icon: 'users', prosecutorOnly: true },
+  { path: '/settings', label: 'Settings', icon: 'settings' },
 ];
 
 @customElement('app-root')
 export class AppRoot extends LightElement {
   @state() private ready = false;
-  @state() private passwordOpen = false;
 
   override connectedCallback() {
     super.connectedCallback();
@@ -66,6 +67,7 @@ export class AppRoot extends LightElement {
     if (path.startsWith('/deployments')) return html`<deployments-page></deployments-page>`;
     if (path.startsWith('/templates')) return html`<templates-page></templates-page>`;
     if (path.startsWith('/api-keys')) return html`<api-keys-page></api-keys-page>`;
+    if (path.startsWith('/settings')) return html`<settings-page></settings-page>`;
     if (path.startsWith('/users')) {
       return session.canWrite
         ? html`<users-page></users-page>`
@@ -122,25 +124,32 @@ export class AppRoot extends LightElement {
             </wa-button>
             <wa-dropdown
               @wa-select=${(e: CustomEvent<{ item: { value: string } }>) =>
-                e.detail.item.value === 'logout' ? this.logout() : (this.passwordOpen = true)}
+                e.detail.item.value === 'logout' ? this.logout() : router.go('/settings')}
             >
-              <wa-button slot="trigger" appearance="plain" size="s" with-caret>
-                ${user.username}
-                <wa-badge
-                  slot="end"
-                  variant=${user.role === 'prosecutor' ? 'brand' : 'neutral'}
-                  appearance="filled-outlined"
+              <wa-button slot="trigger" appearance="plain" size="s" with-caret title="Account">
+                <span class="flex items-center gap-2">
+                  ${userAvatar(user, '1.75rem')}
+                  <span class="hidden sm:inline">${displayName(user)}</span>
+                </span>
+              </wa-button>
+              <div class="flex items-center gap-3 px-3 py-2">
+                ${userAvatar(user, '2.5rem')}
+                <div class="min-w-0">
+                  <div class="truncate font-medium">${displayName(user)}</div>
+                  <div class="truncate text-xs text-(--wa-color-text-quiet)">${user.email || '@' + user.username}</div>
+                </div>
+                <wa-badge variant=${user.role === 'prosecutor' ? 'brand' : 'neutral'} appearance="filled-outlined" class="ml-auto"
                   >${user.role}</wa-badge
                 >
-              </wa-button>
-              <wa-dropdown-item value="password"><wa-icon slot="icon" name="key"></wa-icon>Change password</wa-dropdown-item>
+              </div>
+              <wa-divider></wa-divider>
+              <wa-dropdown-item value="settings"><wa-icon slot="icon" name="settings"></wa-icon>Settings</wa-dropdown-item>
               <wa-dropdown-item value="logout" variant="danger"><wa-icon slot="icon" name="logout"></wa-icon>Sign out</wa-dropdown-item>
             </wa-dropdown>
           </header>
           <main class="w-full min-w-0 flex-1 p-4 md:p-6">${this.page()}</main>
         </div>
       </div>
-      <password-dialog ?open=${this.passwordOpen} @closed=${() => (this.passwordOpen = false)}></password-dialog>
     `;
   }
 }

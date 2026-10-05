@@ -4,6 +4,7 @@ import '@awesome.me/webawesome/dist/styles/webawesome.css';
 import './styles.css';
 import './icons';
 
+import '@awesome.me/webawesome/dist/components/avatar/avatar.js';
 import '@awesome.me/webawesome/dist/components/badge/badge.js';
 import '@awesome.me/webawesome/dist/components/button/button.js';
 import '@awesome.me/webawesome/dist/components/callout/callout.js';
