@@ -1,0 +1,7 @@
+.git
+.idea
+*.test
+web/node_modules
+web/dist
+.env
+compose.env

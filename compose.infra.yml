@@ -1,0 +1,50 @@
+# Optional supporting services: Postgres, RabbitMQ and Redis.
+# Skip this file if you already run them and point the nodes at yours
+# (see node.env / deploy/node.env).
+#
+#   docker compose -f compose.infra.yml up -d
+#
+# Ports are published on the host; the nodes reach them through
+# host.docker.internal, and `go run ./cmd/api` through localhost (.env).
+name: openresty-infra
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: openresty
+      POSTGRES_PASSWORD: openresty
+      POSTGRES_DB: openresty
+    ports: ["15432:5432"]
+    volumes: ["postgres-data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U openresty"]
+      interval: 2s
+      retries: 30
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    hostname: rabbitmq # RabbitMQ keys its data directory on the node name
+    ports: ["5673:5672", "25672:15672"]
+    volumes: ["rabbitmq-data:/var/lib/rabbitmq"]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 3s
+      retries: 40
+    restart: unless-stopped
+
+  redis:
+    image: redis:8-alpine
+    # Sessions only; losing them just means signing in again.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports: ["26379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      retries: 30
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  rabbitmq-data:

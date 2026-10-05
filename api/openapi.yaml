@@ -1,0 +1,758 @@
+openapi: 3.1.0
+info:
+  title: OpenResty Manager API
+  version: 0.1.0
+  description: |
+    Manage OpenResty configuration as templates (trees of directives), and
+    bring rendered configs up or down on OpenResty instances through
+    RabbitMQ-driven agents.
+
+    Placeholders are written as `{{name}}` inside directive args or raw
+    bodies and are filled from the request's `variables` merged over the
+    template's declared defaults.
+
+    Every endpoint except login, logout and /healthz needs a session or an
+    API key: the `__Host-session` cookie set by login (used by the web UI),
+    the returned token as `Authorization: Bearer <token>`, or an API key as
+    `X-API-Key: <key>` (or `Authorization: Bearer <key>`). Sessions are stored
+    in Redis. API keys act as their owner, limited to the key's role, and
+    cannot be used for /auth/password, /users or /api-keys.
+    Roles (see GET /api/v1/roles):
+
+    - `viewer`: every GET, plus template render previews.
+    - `prosecutor`: everything, including deployments and user management.
+
+    Writes by a viewer return 403.
+security:
+  - bearer: []
+  - cookie: []
+  - apiKey: []
+paths:
+  /api/v1/auth/login:
+    post:
+      summary: Sign in
+      description: Creates a session in Redis, sets the `__Host-session` cookie (Secure, HttpOnly, SameSite=Strict) and returns the same token for API clients. Limited to 10 attempts per minute per IP.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string, format: password }
+      responses:
+        "200": { $ref: "#/components/responses/Session" }
+        "401": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+
+  /api/v1/auth/logout:
+    post:
+      summary: End the current session and clear the cookie
+      security: []
+      responses:
+        "204": { description: Signed out }
+
+  /api/v1/auth/me:
+    get:
+      summary: The signed-in user
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /api/v1/auth/password:
+    put:
+      summary: Change your own password
+      description: Signs out the user's other sessions and returns a fresh token.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, new_password]
+              properties:
+                current_password: { type: string, format: password }
+                new_password: { type: string, format: password, minLength: 8, maxLength: 72 }
+      responses:
+        "200": { $ref: "#/components/responses/Session" }
+        "400": { $ref: "#/components/responses/Error" }
+
+  /api/v1/roles:
+    get:
+      summary: List roles and their descriptions
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  roles:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: integer }
+                        name: { type: string }
+                        description: { type: string }
+                        created_at: { type: string, format: date-time }
+
+  /api/v1/api-keys:
+    get:
+      summary: List your API keys (session only)
+      parameters:
+        - { name: all, in: query, description: Prosecutors only; list every user's keys, schema: { type: boolean } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  api_keys: { type: array, items: { $ref: "#/components/schemas/APIKey" } }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      summary: Create an API key for yourself (session only)
+      description: The response contains the key itself; it is never shown again.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, maxLength: 100, description: Unique per user }
+                role: { type: string, default: viewer, description: At most your own role }
+                expires_in_days: { type: integer, minimum: 1, maximum: 3650, description: Omit or 0 for no expiry }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  key: { type: string, example: ork_1a2b3c4d_2Hc0VQ... }
+                  api_key: { $ref: "#/components/schemas/APIKey" }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/api-keys/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    delete:
+      summary: Revoke an API key (session only)
+      description: Your own keys, or anyone's for prosecutors.
+      responses:
+        "204": { description: Revoked }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /api/v1/users:
+    get:
+      summary: List users (prosecutor)
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  users: { type: array, items: { $ref: "#/components/schemas/User" } }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      summary: Create a user (prosecutor)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password, role]
+              properties:
+                username: { $ref: "#/components/schemas/Name" }
+                password: { type: string, format: password, minLength: 8, maxLength: 72 }
+                role: { $ref: "#/components/schemas/Role" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/users/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      summary: Get a user (prosecutor)
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "404": { $ref: "#/components/responses/Error" }
+    patch:
+      summary: Change a user's role or reset their password (prosecutor)
+      description: A password reset signs the user out everywhere. You cannot remove your own prosecutor role.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                role: { $ref: "#/components/schemas/Role" }
+                password: { type: string, format: password, minLength: 8, maxLength: 72 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Delete a user (prosecutor)
+      description: You cannot delete yourself.
+      responses:
+        "204": { description: Deleted }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /healthz:
+    get:
+      summary: Liveness and database check
+      security: []
+      responses:
+        "200": { description: OK }
+        "503": { description: Database unreachable }
+
+  /api/v1/templates:
+    get:
+      summary: List templates (without directive trees)
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  templates: { type: array, items: { $ref: "#/components/schemas/Template" } }
+    post:
+      summary: Create a template with its whole directive tree
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TemplateInput" }
+      responses:
+        "201": { $ref: "#/components/responses/Template" }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/templates/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      summary: Get a template with its directive tree
+      responses:
+        "200": { $ref: "#/components/responses/Template" }
+        "404": { $ref: "#/components/responses/Error" }
+    put:
+      summary: Replace a template, its variables and its whole tree
+      description: Directive IDs are reassigned.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TemplateInput" }
+      responses:
+        "200": { $ref: "#/components/responses/Template" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Delete a template and all of its directives
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /api/v1/templates/{id}/render:
+    parameters:
+      - { $ref: "#/components/parameters/id" }
+      - name: format
+        in: query
+        schema: { type: string, enum: [text] }
+        description: "`text` returns the config as text/plain."
+    post:
+      summary: Preview the rendered config
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                variables: { $ref: "#/components/schemas/Variables" }
+      responses:
+        "200":
+          description: Rendered config
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  variables: { $ref: "#/components/schemas/Variables" }
+                  config: { type: string }
+            text/plain:
+              schema: { type: string }
+        "400": { $ref: "#/components/responses/Error" }
+
+  /api/v1/templates/{id}/directives:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      summary: Add a directive (with its children) to a template
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - { $ref: "#/components/schemas/Directive" }
+                - type: object
+                  properties:
+                    parent_id:
+                      type: integer
+                      description: Parent directive; omit for top level. The parent becomes a block.
+                    position:
+                      type: integer
+                      description: Index among siblings; omit to append.
+      responses:
+        "201": { $ref: "#/components/responses/Directive" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /api/v1/templates/{id}/directives/{did}:
+    parameters:
+      - { $ref: "#/components/parameters/id" }
+      - { name: did, in: path, required: true, schema: { type: integer } }
+    get:
+      summary: Get a directive and its subtree
+      responses:
+        "200": { $ref: "#/components/responses/Directive" }
+        "404": { $ref: "#/components/responses/Error" }
+    patch:
+      summary: Update a directive
+      description: Omitted fields are unchanged. `children` replaces the whole subtree. `raw` set to "" clears the raw body.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                name: { type: string }
+                args: { type: array, items: { type: string } }
+                block: { type: boolean }
+                raw: { type: string }
+                comment: { type: string }
+                position: { type: integer }
+                children: { type: array, items: { $ref: "#/components/schemas/Directive" } }
+      responses:
+        "200": { $ref: "#/components/responses/Directive" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Delete a directive and its subtree
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /api/v1/instances:
+    get:
+      summary: List instances
+      parameters:
+        - { name: service, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  instances: { type: array, items: { $ref: "#/components/schemas/Instance" } }
+    post:
+      summary: Register an instance
+      description: Agents also register themselves on their first heartbeat.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/InstanceInput" }
+      responses:
+        "201": { $ref: "#/components/responses/Instance" }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/instances/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      summary: Get an instance
+      responses:
+        "200": { $ref: "#/components/responses/Instance" }
+        "404": { $ref: "#/components/responses/Error" }
+    put:
+      summary: Update an instance
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/InstanceInput" }
+      responses:
+        "200": { $ref: "#/components/responses/Instance" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Delete an instance and its deployment history
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /api/v1/instances/{id}/configs:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      summary: Current up/down state of each config on the instance
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  configs: { type: array, items: { $ref: "#/components/schemas/InstanceConfig" } }
+
+  /api/v1/deployments/up:
+    post:
+      summary: Render a template and bring it up on the target instances
+      description: |
+        Writes `<conf_dir>/<deployment_id>.conf` on each target, removes the
+        files of earlier deployments of the same config, runs the config test
+        and reloads. Returns immediately; poll the deployments
+        for the agent's result.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/Target"
+                - type: object
+                  required: [template_id, config_name]
+                  properties:
+                    template_id: { type: integer }
+                    config_name: { $ref: "#/components/schemas/Name" }
+                    variables: { $ref: "#/components/schemas/Variables" }
+            example:
+              template_id: 1
+              config_name: hello
+              service: edge
+              variables: { server_name: demo.local }
+      responses:
+        "202": { $ref: "#/components/responses/Deployments" }
+        "400": { $ref: "#/components/responses/Error" }
+
+  /api/v1/deployments/down:
+    post:
+      summary: Remove a config from the target instances
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/Target"
+                - type: object
+                  required: [config_name]
+                  properties:
+                    config_name: { $ref: "#/components/schemas/Name" }
+      responses:
+        "202": { $ref: "#/components/responses/Deployments" }
+        "400": { $ref: "#/components/responses/Error" }
+
+  /api/v1/deployments:
+    get:
+      summary: List deployments, newest first
+      parameters:
+        - { name: instance_id, in: query, schema: { type: integer } }
+        - { name: config_name, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/DeploymentStatus" } }
+        - { name: limit, in: query, description: Page size, schema: { type: integer, default: 100, maximum: 500 } }
+        - { name: offset, in: query, description: Number of deployments to skip, schema: { type: integer, default: 0 } }
+      responses:
+        "200":
+          description: One page of deployments and the number matching the filter
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deployments: { type: array, items: { $ref: "#/components/schemas/Deployment" } }
+                  total: { type: integer }
+
+  /api/v1/deployments/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      summary: Get a deployment, including the rendered config
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Deployment" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Remove a deployment
+      description: |
+        If the deployment is what its instance currently runs for the config,
+        a down is issued that deletes `<deployment_id>.conf`, tests and
+        reloads; the deployment row is deleted once that down is applied.
+        Otherwise the row is deleted immediately.
+      responses:
+        "202":
+          description: The down that removes the live config file
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deployment: { $ref: "#/components/schemas/Deployment" }
+        "204": { description: Removed }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+components:
+  securitySchemes:
+    bearer: { type: http, scheme: bearer, description: Opaque session token returned by login }
+    cookie: { type: apiKey, in: cookie, name: __Host-session }
+    apiKey: { type: apiKey, in: header, name: X-API-Key, description: "Key from POST /api/v1/api-keys, e.g. ork_1a2b3c4d_..." }
+
+  parameters:
+    id: { name: id, in: path, required: true, schema: { type: integer } }
+
+  responses:
+    Session:
+      description: Signed in
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              token: { type: string }
+              expires_at: { type: string, format: date-time }
+              user: { $ref: "#/components/schemas/User" }
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: { type: string }
+              field: { type: string, description: Path of the offending input, when known }
+    Template:
+      description: Template
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Template" }
+    Directive:
+      description: Directive with subtree
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Directive" }
+    Instance:
+      description: Instance
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Instance" }
+    Deployments:
+      description: Deployments, one per targeted instance
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              deployments: { type: array, items: { $ref: "#/components/schemas/Deployment" } }
+
+  schemas:
+    Role:
+      type: string
+      description: Name of a role in the roles table.
+      example: viewer
+
+    User:
+      type: object
+      properties:
+        id: { type: integer }
+        username: { type: string }
+        role: { $ref: "#/components/schemas/Role" }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    APIKey:
+      type: object
+      properties:
+        id: { type: integer }
+        user_id: { type: integer }
+        owner: { type: string }
+        name: { type: string }
+        prefix: { type: string, example: ork_1a2b3c4d }
+        role: { type: string }
+        expires_at: { type: [string, "null"], format: date-time }
+        last_used_at: { type: [string, "null"], format: date-time, description: Updated at most once a minute }
+        created_at: { type: string, format: date-time }
+
+    Name:
+      type: string
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+
+    Variables:
+      type: object
+      additionalProperties:
+        type: string
+        description: Must not contain newlines, quotes, backslashes or any of ;{}
+      example: { server_name: demo.local, port: "8080" }
+
+    Variable:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        default: { type: string }
+        required: { type: boolean, default: false }
+        description: { type: string }
+
+    Directive:
+      type: object
+      required: [name]
+      description: |
+        One nginx directive. With `children` (or `block: true`) it renders as
+        `name args { ... }`; with `raw` its body is copied verbatim, for
+        OpenResty `*_by_lua_block` directives. Arguments containing
+        whitespace or any of `;{}` must be quoted.
+      properties:
+        id: { type: integer, readOnly: true }
+        parent_id: { type: integer, readOnly: true }
+        position: { type: integer, readOnly: true }
+        name: { type: string, pattern: "^[A-Za-z_][A-Za-z0-9_]*$", example: location }
+        args: { type: array, items: { type: string }, example: ["/api"] }
+        block: { type: boolean, description: Render as a block even without children }
+        raw: { type: string, example: 'ngx.say("hi")' }
+        comment: { type: string }
+        children: { type: array, items: { $ref: "#/components/schemas/Directive" } }
+
+    TemplateInput:
+      type: object
+      required: [name]
+      properties:
+        name: { $ref: "#/components/schemas/Name" }
+        description: { type: string }
+        variables: { type: array, items: { $ref: "#/components/schemas/Variable" } }
+        directives: { type: array, items: { $ref: "#/components/schemas/Directive" } }
+      example:
+        name: hello-site
+        variables:
+          - { name: port, default: "80" }
+          - { name: server_name, required: true }
+        directives:
+          - name: server
+            children:
+              - { name: listen, args: ["{{port}}"] }
+              - { name: server_name, args: ["{{server_name}}"] }
+              - name: location
+                args: ["=", "/hello"]
+                children:
+                  - { name: content_by_lua_block, raw: 'ngx.say("hello")' }
+
+    Template:
+      allOf:
+        - $ref: "#/components/schemas/TemplateInput"
+        - type: object
+          properties:
+            id: { type: integer }
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+
+    InstanceInput:
+      type: object
+      required: [name, service]
+      properties:
+        name: { $ref: "#/components/schemas/Name" }
+        service: { $ref: "#/components/schemas/Name" }
+        host: { type: string }
+        description: { type: string }
+
+    Instance:
+      allOf:
+        - $ref: "#/components/schemas/InstanceInput"
+        - type: object
+          properties:
+            id: { type: integer }
+            status:
+              type: string
+              enum: [online, offline, unknown]
+              description: From the last heartbeat; unknown if never seen.
+            last_seen_at: { type: [string, "null"], format: date-time }
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+
+    InstanceConfig:
+      type: object
+      properties:
+        config_name: { type: string }
+        template_id: { type: [integer, "null"] }
+        state: { type: string, enum: [up, down] }
+        deployment_id: { type: integer }
+        updated_at: { type: string, format: date-time }
+
+    Target:
+      type: object
+      description: Set exactly one of `instances` or `service`.
+      properties:
+        instances: { type: array, items: { type: string } }
+        service: { type: string }
+
+    DeploymentStatus:
+      type: string
+      enum: [pending, published, applied, failed]
+
+    Deployment:
+      type: object
+      properties:
+        id: { type: integer }
+        instance_id: { type: integer }
+        instance: { type: string }
+        service: { type: string }
+        template_id: { type: [integer, "null"] }
+        config_name: { type: string }
+        action: { type: string, enum: [up, down] }
+        variables: { $ref: "#/components/schemas/Variables" }
+        rendered_config: { type: string, description: "Only on GET /deployments/{id} and create responses" }
+        status: { $ref: "#/components/schemas/DeploymentStatus" }
+        error: { type: string }
+        requested_by: { type: string, description: Username that asked for the deployment }
+        removes_deployment_id: { type: integer, description: Set on a down issued to remove that deployment }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }

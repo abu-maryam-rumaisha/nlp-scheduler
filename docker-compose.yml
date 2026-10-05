@@ -1,0 +1,52 @@
+# One manager (API and web UI) and any number of agents, each an OpenResty
+# instance with openresty-agent alongside it.
+#
+# They need Postgres, Redis and RabbitMQ: start the bundled ones with
+# `docker compose -f compose.infra.yml up -d`, or use existing servers by
+# creating compose.env (see deploy/manager.env and deploy/agent.env).
+#
+#   docker compose up -d --build
+name: openresty-manager
+
+x-agent: &agent
+  build: { context: ., target: agent }
+  # Shared settings first, then local overrides from compose.env.
+  env_file:
+    - path: deploy/agent.env
+    - path: compose.env
+      required: false
+  extra_hosts: ["host.docker.internal:host-gateway"]
+  restart: unless-stopped
+
+services:
+  manager:
+    build: { context: ., target: manager }
+    env_file:
+      - path: deploy/manager.env
+      - path: compose.env
+        required: false
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    ports: ["18080:8080"]
+    restart: unless-stopped
+
+  # Agents of the "edge" service. To add one, copy a block and give it a new
+  # AGENT_INSTANCE, port and volume. Each agent consumes its own queue.
+  edge-1:
+    <<: *agent
+    environment:
+      AGENT_INSTANCE: edge-1
+    ports: ["18081:80"]
+    volumes: ["edge-1-conf:/etc/nginx/conf.d"]
+
+  edge-2:
+    <<: *agent
+    environment:
+      AGENT_INSTANCE: edge-2
+    ports: ["18082:80"]
+    volumes: ["edge-2-conf:/etc/nginx/conf.d"]
+
+# Deployed configs outlive the agent containers. A new named volume starts
+# with the image's default.conf.
+volumes:
+  edge-1-conf:
+  edge-2-conf:
